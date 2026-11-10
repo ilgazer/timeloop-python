@@ -9,6 +9,29 @@ import yaml
 
 LEVEL_PATTERN = re.compile("=== (?P<level>.*) ===")
 
+# Header that starts the stats of one mapping. timeloop-ga-mapper writes the
+# stats of several mappings to one file, best first.
+STATS_HEADER = "Buffer and Arithmetic Levels"
+# Last line of one mapping in a .map.txt file.
+MAPPING_END = "<< Compute >>"
+
+
+def first_mapping(map_txt: str) -> str:
+    """
+    Get the first mapping from the contents of a .map.txt file. timeloop-ga-mapper
+    writes several mappings to one file, best first.
+
+    Args:
+        map_txt (str): The contents of the .map.txt file.
+
+    Returns:
+        str: The first mapping. The full contents if there is only one mapping.
+    """
+    if map_txt.count(MAPPING_END) <= 1:
+        return map_txt
+    end = map_txt.index(MAPPING_END) + len(MAPPING_END)
+    return map_txt[: map_txt.index("\n", end) + 1]
+
 
 def parse_stats_file(path: str) -> Tuple[int, int, float, dict]:
     """
@@ -35,6 +58,10 @@ def parse_stats_stream(stream: io.TextIOBase):
 
     """
     lines = stream.readlines()
+    # If the stats of several mappings are in the stream, only parse the first.
+    starts = [i for i, l in enumerate(lines) if l.startswith(STATS_HEADER)]
+    if len(starts) > 1:
+        lines = lines[: starts[1]]
     cycles, computes, util, energy = None, None, None, {}
     for i, l in enumerate(lines):
         if "Computes =" in l:
@@ -472,7 +499,8 @@ def parse_timeloop_output(
     spec.parse_expressions()
     mapping = None
     if os.path.exists(stats_path.replace(".stats.txt", ".map.txt")):
-        mapping = open(stats_path.replace(".stats.txt", ".map.txt")).read()
+        with open(stats_path.replace(".stats.txt", ".map.txt")) as f:
+            mapping = first_mapping(f.read())
 
     try:
         cycle_seconds = spec.variables["GLOBAL_CYCLE_SECONDS"]

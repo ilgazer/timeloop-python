@@ -164,28 +164,49 @@ def _parse_output(
     output_dir: str,
     result: Union[int, subprocess.Popen],
     for_model: bool = False,
+    prefix: Optional[str] = None,
+    name: Optional[str] = None,
+    debug_cmd: Optional[str] = None,
 ) -> Union[int, subprocess.Popen]:
-    """ """
+    """Raise if the call failed, otherwise parse its output files.
+
+    Args:
+        specification (BaseSpecification): The specification that was run.
+        output_dir (str): The directory the call was run in.
+        result (Union[int, subprocess.Popen]): The return code or process of the call.
+        for_model (bool): Whether the call was Timeloop model or mapper.
+        prefix (Optional[str]): Prefix of the output files. Defaults to timeloop-model or timeloop-mapper.
+        name (Optional[str]): Name of the called program for error messages.
+        debug_cmd (Optional[str]): Command line that reproduces the call, for error messages.
+    """
     if isinstance(result, subprocess.Popen):
         return result
 
     m = "model" if for_model else "mapper"
+    processed_input = os.path.join(output_dir, "parsed-processed-input.yaml")
+    if prefix is None:
+        prefix = f"timeloop-{m}"
+    if name is None:
+        name = f"Timeloop {m}"
+    if debug_cmd is None:
+        debug_cmd = f"tl {m} {processed_input}"
     errmsg = (
         f"\n\n" + "=" * 120 + "\n"
-        f"Timeloop {m} failed with return code {result}. Please check the output files "
+        f"{name} failed with return code {result}. Please check the output files "
         f"in {output_dir} for more information. To debug, you can edit the file:"
-        f"\n\t{os.path.join(output_dir, 'parsed-processed-input.yaml')}\nand run "
-        f"\n\ttl {m} {os.path.join(output_dir, 'parsed-processed-input.yaml')}\nto see the error. "
-        f"If you're running the mapper and Timeloop can't find a vaild mapping, try setting "
-        f"'diagnostics: true' in the mapper input specification."
+        f"\n\t{processed_input}\nand run "
+        f"\n\t{debug_cmd}\nto see the error. "
     )
+    if not for_model and prefix == "timeloop-mapper":
+        errmsg += (
+            f"If you're running the mapper and Timeloop can't find a vaild mapping, try setting "
+            f"'diagnostics: true' in the mapper input specification."
+        )
 
     if result != 0:
         raise RuntimeError(errmsg)
     try:
-        return specification._parse_timeloop_output(
-            output_dir, prefix="timeloop-model" if for_model else "timeloop-mapper"
-        )
+        return specification._parse_timeloop_output(output_dir, prefix=prefix)
     except Exception as e:
         raise RuntimeError(f"{errmsg}") from e
 
@@ -233,6 +254,118 @@ def call_mapper(
             return_proc=return_proc,
         ),
         for_model=False,
+    )
+
+
+# Default design space exploration settings for timeloop-ga-mapper. Keys given
+# in the "dse" argument of call_ga_mapper override these.
+DEFAULT_GA_MAPPER_DSE: Dict[str, Any] = {
+    "algorithm": "genetic_algorithm",
+    "auto_bypass_on_failure": False,
+    "selection": "nsga_ii",
+    "elitism": True,
+    "gens": 1000,
+    "n": 100,
+    "keep": 50,
+    "first_gen": 400,
+    "mh_enabled": True,
+    "mh_convergence_rounds": 5000,
+    "mh_initial_beta": 8,
+    "mh_cooling_schedule": 1.1,
+    "mh_proposal_std": 0.2,
+    "mh_successful_rounds": 5,
+    "mh_correction": True,
+    "mh_max_mutation_tries": 100,
+}
+
+
+def _get_ga_mapper_dse(
+    dse: Optional[Union[Dict[str, Any], str, os.PathLike]] = None,
+) -> Dict[str, Any]:
+    """Merge user DSE settings over DEFAULT_GA_MAPPER_DSE.
+
+    Args:
+        dse: A dict of settings, or the path to a YAML file containing them. Either
+            may hold the settings directly or under a top-level "dse" key.
+
+    Returns:
+        Dict[str, Any]: The merged settings.
+    """
+    if dse is None:
+        dse = {}
+    elif isinstance(dse, (str, os.PathLike)):
+        import yaml
+
+        with open(dse, "r") as f:
+            dse = yaml.safe_load(f) or {}
+    if not isinstance(dse, dict):
+        raise TypeError(
+            f"dse must be a dict or a path to a YAML file, got {type(dse)}"
+        )
+    if isinstance(dse.get("dse", None), dict):
+        dse = dse["dse"]
+    return {**DEFAULT_GA_MAPPER_DSE, **dse}
+
+
+def call_ga_mapper(
+    specification: BaseSpecification,
+    output_dir: str,
+    dse: Optional[Union[Dict[str, Any], str, os.PathLike]] = None,
+    environment: Optional[Dict[str, str]] = None,
+    extra_input_files: Optional[List[str]] = None,
+    dump_intermediate_to: Optional[str] = None,
+    log_to: Optional[Union[str, Any]] = None,
+    extra_args: List[str] = (),
+    return_proc: bool = False,
+) -> Union[Any, subprocess.Popen]:
+    """Call the Timeloop genetic algorithm mapper (timeloop-ga-mapper) from Python
+
+    Args:
+        specification (BaseSpecification): The specification with which to call Timeloop.
+        output_dir (str): The directory to run Timeloop in.
+        dse (Optional[Union[Dict[str, Any], str, os.PathLike]]): Design space exploration
+            settings, as a dict or the path to a YAML file. They may be given directly or
+            under a top-level "dse" key. Any key that is given overrides the matching key
+            in DEFAULT_GA_MAPPER_DSE.
+        environment (Optional[Dict[str, str]]): A dictionary of environment variables to pass to Timeloop.
+        extra_input_files (Optional[List[str]]): A list of extra input files to pass to Timeloop
+        dump_intermediate_to (Optional[str]): If not None, dump the input content to this file before calling Timeloop.
+        log_to (Optional[Union[str, Any]]): If not None, log the output of the Timeloop call to this file or file-like object.
+        extra_args (List[str]): A list of extra arguments to pass to Timeloop.
+        return_proc (bool): If True, return the subprocess.Popen object instead of the return code.
+
+    Returns:
+        Union[Any, subprocess.Popen]: The parsed output stats of the first (best) mapping
+        that timeloop-ga-mapper reports, or the subprocess.Popen object if return_proc is True.
+    """
+    input_paths, output_dir = _pre_call(
+        specification, output_dir, extra_input_files, for_model=False
+    )
+
+    # timeloop-ga-mapper reads its settings from the top-level "dse" key of
+    # its merged input files.
+    dse_path = os.path.abspath(os.path.join(output_dir, "dse.yaml"))
+    with open(dse_path, "w") as f:
+        f.write(to_yaml_string({"dse": _get_ga_mapper_dse(dse)}))
+    input_paths.insert(1, dse_path)
+
+    return _parse_output(
+        specification=specification,
+        output_dir=output_dir,
+        result=_call(
+            "timeloop-ga-mapper",
+            input_paths=input_paths,
+            output_dir=output_dir,
+            environment=environment,
+            dump_intermediate_to=dump_intermediate_to,
+            log_to=log_to,
+            extra_args=extra_args,
+            return_proc=return_proc,
+        ),
+        for_model=False,
+        prefix="timeloop-ga",
+        name="Timeloop GA mapper",
+        debug_cmd=f"timeloop-ga-mapper {' '.join(input_paths)}",
     )
 
 
