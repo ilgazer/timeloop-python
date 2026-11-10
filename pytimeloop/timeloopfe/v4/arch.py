@@ -522,7 +522,7 @@ class StorageAttributes(Attributes):
         super().add_attr("n_banks", (str, int), 2)
         super().add_attr("block_size", (str, int), None)
         super().add_attr("cluster_size", (str, int), 1)
-        super().add_attr("width", (str, int))
+        super().add_attr("width", (str, int), None)
         super().add_attr("depth", (str, int), None)
         super().add_attr("entries", (str, int), None)
         super().add_attr("sizeKB", (str, int), None)
@@ -587,8 +587,6 @@ class StorageAttributes(Attributes):
         ]
         self.decompression_supported: Union[str, bool] = self["decompression_supported"]
         self.compression_supported: Union[str, bool] = self["compression_supported"]
-        if self.depth is None:
-            print(f'WARNING: "depth" is not set for storage element {self.name}')
 
 
 class Nothing(Component):
